@@ -66,60 +66,51 @@ async def on_ready():
 
 @tasks.loop(seconds=10)
 async def now_playing_check():
-    global last_user_info
+    global last_user_info, last_global_nothing_message
     print("Checking now playing...")
 
     try:
-        # Send a GET request to Emby API to retrieve session information
         response = requests.get(f'http://{emby_server_ip}:{emby_server_port}/Sessions', headers={'X-Emby-Token': api_key})
-
         if response.status_code != 200:
             print(f"Failed to retrieve 'Now Playing' information from Emby. Status Code: {response.status_code}")
             return
 
-        # Debug statement to show the raw response content
-        print("Raw Response Content:")
-        print(response.content)
-
         now_playing_data = response.json()
+        active_users = {}
 
-        # Debug statement to show the parsed JSON data
-        print("Parsed JSON Data (now_playing_data):")
-        print(now_playing_data)
-
-        current_active_users = set()
-
-        # Iterate through the sessions data
         for session in now_playing_data:
             username = session.get('UserName', '').lower()
-            print(f"Processing session for user: {username}")
-
-            if username in [user.lower() for user in users_ignore]:
-                print(f"Skipping ignored user: {username}")
-                continue
-            elif username not in [user.lower() for user in users_watch]:
-                print(f"User {username} not in monitored list.")
+            if username in users_ignore or username not in users_watch:
                 continue
 
             item = session.get('NowPlayingItem')
             if item:
-                current_active_users.add(username)
-                if item.get('Id') != last_user_info.get(username, {}).get('last_item_id'):
-                    last_user_info.setdefault(username, {})['last_item_id'] = item.get('Id')
-                    media_type = item.get('Type').lower()  # Convert to lowercase
-                    await handle_media(bot, item, emby_server_ip, emby_server_port, api_key, item.get('Id'), username, media_type)
-                    print(f"User {username} is watching {media_type} with ID {item.get('Id')}")
-            else:
-                print(f"User {username} is not watching anything.")
+                media_type = item.get('Type').lower()
+                item_id = item.get('Id')
+                active_users[username] = item_id
+                if last_user_info.get(username, {}).get('last_item_id') != item_id:
+                    await handle_media(bot, item, emby_server_ip, emby_server_port, api_key, item_id, username, media_type)
 
-        # Debug statement to show the set of current active users
-        print("Current Active Users:")
-        print(current_active_users)
+        # Handle users that are no longer active
+        for username, user_info in list(last_user_info.items()):
+            if username not in active_users and user_info['last_item_id'] is not None:
+                if user_info['last_message']:
+                    await user_info['last_message'].delete()
+                    user_info['last_message'] = None
+                user_info['last_item_id'] = None
 
-        await handle_nothing_playing(current_active_users)
+        # Display "Nothing Playing" if no users are active
+        if not active_users and not last_global_nothing_message:
+            last_global_nothing_message = await handle_nothing_global()
+            print("Displayed 'Nothing Playing' message.")
+        elif active_users and last_global_nothing_message:
+            await last_global_nothing_message.delete()
+            last_global_nothing_message = None
+            print("Removed 'Nothing Playing' message.")
 
     except Exception as e:
         print(f"An error occurred: {str(e)}")
+
 
 async def handle_nothing_playing(current_active_users):
     global last_global_nothing_message
@@ -152,10 +143,10 @@ async def handle_nothing_playing(current_active_users):
 async def handle_nothing_global():
     global last_global_nothing_message
 
-    image_path = './ASSETS/Nothing_Playing.png'
-    file = discord.File(image_path, filename='Nothing_Playing.png')
+    image_path = './ASSETS/Nothing_Playing.jpg'
+    file = discord.File(image_path, filename='Nothing_Playing.jpg')
     embed = discord.Embed(title="\u200B", color=discord.Color.blue())
-    embed.set_image(url="attachment://Nothing_Playing.png")
+    embed.set_image(url="attachment://Nothing_Playing.jpg")
 
     last_global_nothing_message = await bot.now_playing_thread.send(embed=embed, file=file)
     return last_global_nothing_message
@@ -175,12 +166,12 @@ async def handle_nothing(username):
     global last_user_info
 
     # Path to the image file
-    image_path = './ASSETS/Nothing_Playing.png'
-    file = discord.File(image_path, filename='Nothing_Playing.png')
+    image_path = './ASSETS/Nothing_Playing.jpg'
+    file = discord.File(image_path, filename='Nothing_Playing.jpg')
 
     # Create an embed with the image
     embed = discord.Embed(title="\u200B", color=discord.Color.blue())  # Invisible character as title
-    embed.set_image(url="attachment://Nothing_Playing.png")
+    embed.set_image(url="attachment://Nothing_Playing.jpg")
 
     # Update the last message in last_user_info dictionary
     last_message = last_user_info[username]['last_message']
@@ -193,44 +184,18 @@ async def handle_nothing(username):
     last_user_info[username]['last_message'] = await bot.now_playing_thread.send(embed=embed, file=file)
     last_user_info[username]['last_item_id'] = None
 
-
-async def handle_episode(bot, item, emby_server_ip, emby_server_port, api_key, username):
-    series_title = item.get('SeriesName', 'Unknown Series')
-    title = item.get('Name')
-    episode_number = item.get('IndexNumber', 'Unknown Episode')
-    season_number = item.get('ParentIndexNumber', None)
-
-    # Extract the show directory path from the network share
-    item_path = item.get('Path')
-    show_directory = os.path.dirname(os.path.dirname(item_path))  # Go up two levels to get to the show directory
-    folder_image_path = os.path.join(show_directory, 'folder.jpg')
-
-    # Check if the folder.jpg exists, if not use Series_Missing.png
-    if os.path.exists(folder_image_path):
-        file = discord.File(folder_image_path, filename='folder_image.jpg')
-    else:
-        file = discord.File('./ASSETS/Series_Missing.png', filename='Series_Missing.png')
-
-    embed_title = f"{series_title}\n(S{season_number:02d}E{episode_number:02d}) {title}"
-    embed = discord.Embed(title=embed_title, color=discord.Color.blue())
-    overview = item.get('Overview', 'No overview available')
-    embed.add_field(name="Overview", value=overview, inline=False)
-    embed.set_image(url="attachment://folder_image.jpg" if os.path.exists(folder_image_path) else "attachment://Series_Missing.png")
-
-    # Update the last message for the user
-    last_message = last_user_info[username]['last_message']
-    if last_message:
-        try:
-            await last_message.delete()
-        except discord.NotFound:
-            pass
-    last_user_info[username]['last_message'] = await bot.now_playing_thread.send(embed=embed, file=file)
-
 async def handle_media(bot, item, emby_server_ip, emby_server_port, api_key, item_id, username, media_type):
+    global last_user_info
+
     print(f"Handling media for user {username}. Media type: {media_type}")
 
     # Convert media_type to lowercase for case-insensitive comparison
     media_type = media_type.lower()
+
+    # Check if the current item is the same as the last one
+    if last_user_info[username]['last_item_id'] == item_id:
+        # No change in the item being played, no need to update
+        return
 
     if media_type == 'movie':
         await handle_movie(bot, item, emby_server_ip, emby_server_port, api_key, item_id, username)
@@ -245,64 +210,132 @@ async def handle_media(bot, item, emby_server_ip, emby_server_port, api_key, ite
     else:
         await handle_generic_media(bot, item, username, media_type)
 
+    # Update the last item ID for this user
+    last_user_info[username]['last_item_id'] = item_id
 
 
 
-async def handle_music_video(bot, item, username):
-    title = item.get('Name', 'Unknown Music Video')
-    artist = ", ".join(item.get('Artists', ['Unknown Artist']))
-    album = item.get('Album', 'Unknown Album')
-    year = item.get('ProductionYear', 'Unknown Year')
+async def handle_episode(bot, item, emby_server_ip, emby_server_port, api_key, username):
+    series_title = item.get('SeriesName', 'Unknown Series')
+    title = item.get('Name')
+    episode_number = item.get('IndexNumber', 'Unknown Episode')
+    season_number = item.get('ParentIndexNumber', None)
 
-    description = f"Artist: {artist}\nAlbum: {album}\nYear: {year}\nTitle: {title}"
-    
-    embed = discord.Embed(title="Music Video", description=description, color=discord.Color.blue())
-    
-    await update_or_send_new_message(bot, embed, username)
+    # Extract the show directory path from the network share
+    item_path = item.get('Path')
+    show_directory = os.path.dirname(os.path.dirname(item_path))  # Go up two levels to get to the show directory
+    folder_image_path = os.path.join(show_directory, 'folder.jpg')
 
-channel = bot.get_channel(emby_thread_channel_id)
+    # Check if the folder.jpg exists, if not use Series_Missing.jpg
+    if os.path.exists(folder_image_path):
+        file = discord.File(folder_image_path, filename='folder_image.jpg')
+    else:
+        file = discord.File('./ASSETS/Series_Missing.jpg', filename='Series_Missing.jpg')
+
+    embed_title = f"{series_title}\n(S{season_number:02d}E{episode_number:02d}) {title}"
+    embed = discord.Embed(title=embed_title, color=discord.Color.blue())
+    overview = item.get('Overview', 'No overview available')
+    embed.add_field(name="Overview", value=overview, inline=False)
+    embed.set_image(url="attachment://folder_image.jpg" if os.path.exists(folder_image_path) else "attachment://Series_Missing.jpg")
+
+    # Update the last message for the user
+    last_message = last_user_info[username]['last_message']
+    if last_message:
+        try:
+            await last_message.delete()
+            print(f"Deleted last message for {username} (episode).")
+        except discord.NotFound:
+            pass
+    last_user_info[username]['last_message'] = await bot.now_playing_thread.send(embed=embed, file=file)
+    print(f"Sent new episode message for {username}.")
 
 
 async def handle_audio(bot, item, emby_server_ip, emby_server_port, api_key, username):
+    global last_user_info
+
     try:
+        # If no item is playing, clear the last message and reset last_item_id.
+        if not item and last_user_info[username]['last_item_id'] is not None:
+            if last_user_info[username]['last_message']:
+                await last_user_info[username]['last_message'].delete()
+                last_user_info[username]['last_message'] = None
+            last_user_info[username]['last_item_id'] = None
+            return
+
+        current_item_id = item.get('Id') if item else None
+
+        # Skip if the current item is the same as the last one.
+        if last_user_info[username]['last_item_id'] == current_item_id:
+            return
+
         title = item.get('Name', 'Unknown Title')
         album_artist = item.get('AlbumArtist', 'Unknown Artist')
         album = item.get('Album', 'Unknown Album')
-        item_id = item.get('Id')
         image_tag = item.get('ImageTags', {}).get('Primary')
 
-        # Construct the image URL with the API key
+        # Construct the image URL with the API key.
         image_url = ""
         if image_tag:
-            image_url = f"http://{emby_server_ip}:{emby_server_port}/emby/Items/{item_id}/Images/Primary?tag={image_tag}&api_key={api_key}"
+            image_url = f"http://{emby_server_ip}:{emby_server_port}/emby/Items/{current_item_id}/Images/Primary?tag={image_tag}&api_key={api_key}"
 
-        # Create a description for the embed
+        # Create the embed.
         description = f"**Title:** {title}\n**Album Artist:** {album_artist}\n**Album:** {album}"
-
-        # Construct the embed
         embed = discord.Embed(title="Audio", description=description, color=discord.Color.blue())
 
         if image_url:
-            # Attempt to download the image
+            # Attempt to download and attach the image.
             response = requests.get(image_url)
             if response.status_code == 200:
                 with BytesIO(response.content) as image_io:
                     image_io.seek(0)
                     discord_file = discord.File(fp=image_io, filename='image.jpg')
                     embed.set_image(url="attachment://image.jpg")
-                    # Send the embed message with image
-                    await bot.now_playing_thread.send(embed=embed, file=discord_file)
+                    await update_or_send_new_message(bot, embed, username, file=discord_file)
             else:
-                # If the image download fails, just send the embed without the image
-                await bot.now_playing_thread.send(embed=embed)
+                await update_or_send_new_message(bot, embed, username)
         else:
-            # If no image URL is available, send the embed without an image
-            await bot.now_playing_thread.send(embed=embed)
+            await update_or_send_new_message(bot, embed, username)
+
+        last_user_info[username]['last_item_id'] = current_item_id
 
     except Exception as e:
         print(f"An error occurred while handling audio: {str(e)}")
 
 
+async def handle_music_video(bot, item, username):
+    global last_user_info
+
+    try:
+        # If no item is playing, clear the last message and reset last_item_id.
+        if not item and last_user_info[username]['last_item_id'] is not None:
+            if last_user_info[username]['last_message']:
+                await last_user_info[username]['last_message'].delete()
+                last_user_info[username]['last_message'] = None
+            last_user_info[username]['last_item_id'] = None
+            return
+
+        current_item_id = item.get('Id') if item else None
+
+        # Skip if the current item is the same as the last one.
+        if last_user_info[username]['last_item_id'] == current_item_id:
+            return
+
+        title = item.get('Name', 'Unknown Music Video')
+        artist = ", ".join(item.get('Artists', ['Unknown Artist']))
+        album = item.get('Album', 'Unknown Album')
+        year = item.get('ProductionYear', 'Unknown Year')
+
+        # Create a description for the embed.
+        description = f"Artist: {artist}\nAlbum: {album}\nYear: {year}\nTitle: {title}"
+        embed = discord.Embed(title="Music Video", description=description, color=discord.Color.blue())
+
+        # Send the embed message
+        await update_or_send_new_message(bot, embed, username)
+
+        last_user_info[username]['last_item_id'] = current_item_id
+
+    except Exception as e:
+        print(f"An error occurred while handling music video: {str(e)}")
 
 
 
@@ -321,18 +354,21 @@ async def update_or_send_new_message(bot, embed, username):
     if last_message:
         try:
             await last_message.edit(embed=embed)
+            print(f"Edited message for {username}.")
         except discord.NotFound:
             last_user_info[username]['last_message'] = await bot.now_playing_thread.send(embed=embed)
+            print(f"Sent new message for {username} (edit failed).")
     else:
         last_user_info[username]['last_message'] = await bot.now_playing_thread.send(embed=embed)
+        print(f"Sent new message for {username}.")
 
 
 async def send_nothing_playing_message():
     global last_global_nothing_message
-    image_path = './ASSETS/Nothing_Playing.png'
-    file = discord.File(image_path, filename='Nothing_Playing.png')
+    image_path = './ASSETS/Nothing_Playing.jpg'
+    file = discord.File(image_path, filename='Nothing_Playing.jpg')
     embed = discord.Embed(title="\u200B", color=discord.Color.blue())  # Invisible character as title
-    embed.set_image(url="attachment://Nothing_Playing.png")
+    embed.set_image(url="attachment://Nothing_Playing.jpg")
     last_global_nothing_message = await bot.now_playing_thread.send(embed=embed, file=file)
 
 async def handle_movie(bot, item, emby_server_ip, emby_server_port, api_key, item_id, username):
@@ -357,10 +393,10 @@ async def handle_movie(bot, item, emby_server_ip, emby_server_port, api_key, ite
         file = discord.File(fp=image_data, filename='now_playing_image.jpg')
     else:
         print(f"Failed to download image from {image_url}. Using default image. Status Code: {image_response.status_code}")
-        file = discord.File('./ASSETS/Movie_Missing.png', filename='Movie_Missing.png')
+        file = discord.File('./ASSETS/Movie_Missing.jpg', filename='Movie_Missing.jpg')
 
     embed = discord.Embed(title=f"{title} ({year})", description=f"**Size:** {size_gb} GB\n**Genres:** {genres}\n**Overview:** {overview}")
-    embed.set_image(url="attachment://now_playing_image.jpg" if image_response.status_code == 200 else "attachment://Movie_Missing.png")
+    embed.set_image(url="attachment://now_playing_image.jpg" if image_response.status_code == 200 else "attachment://Movie_Missing.jpg")
 
     # Update the last message for the user
     last_message = last_user_info[username]['last_message']
