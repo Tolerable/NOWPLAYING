@@ -89,6 +89,7 @@ async def now_playing_check():
 
             item = session.get('NowPlayingItem')
             if item:
+                # print(f"Now Playing Item for user {username}: {item}")  # Uncomment to Print Item details for debugging
                 media_type = item.get('Type').lower()
                 item_id = item.get('Id')
                 active_users[username] = item_id
@@ -108,7 +109,6 @@ async def now_playing_check():
 
     except Exception as e:
         print(f"An error occurred: {str(e)}")
-
 
 
 async def delete_last_bot_message():
@@ -232,7 +232,7 @@ async def handle_media(bot, item, emby_server_ip, emby_server_port, api_key, ite
         elif media_type == 'audio':
             await handle_audio(bot, item, emby_server_ip, emby_server_port, api_key, username)
         elif media_type == 'musicvideo':
-            await handle_music_video(bot, item, username)
+            await handle_music_video(bot, item, emby_server_ip, emby_server_port, api_key, username)
         elif media_type == 'audiobook':
             await handle_audio_book(bot, item, username)
         else:
@@ -336,102 +336,137 @@ async def handle_movie(bot, item, emby_server_ip, emby_server_port, api_key, ite
 
     
     
-async def handle_music_video(bot, item, username):
+async def handle_audio(bot, item, emby_server_ip, emby_server_port, api_key, username):
     global last_user_info
 
     try:
         current_item_id = item.get('Id') if item else None
+        current_time = datetime.utcnow()
 
-        if not item and last_user_info[username]['last_item_id'] is not None:
-            if last_user_info[username]['last_message']:
-                await last_user_info[username]['last_message'].delete()
-                last_user_info[username]['last_message'] = None
-            last_user_info[username]['last_item_id'] = None
+        # Retrieve the last update time and item ID for the user
+        last_update_time = last_user_info[username].get('last_update_time', datetime.utcfromtimestamp(0))
+        last_item_id = last_user_info[username].get('last_item_id')
+
+        # Check if enough time has passed since the last update
+        if not item or (last_item_id == current_item_id and current_time - last_update_time < timedelta(seconds=10)):
             return
 
-        if last_user_info[username]['last_item_id'] == current_item_id:
+        # Delete the previous message for the user, if any
+        last_message = last_user_info[username].get('last_message')
+        if last_message:
+            try:
+                await last_message.delete()
+                print("Deleted last message.")
+            except discord.HTTPException as e:
+                print(f"Failed to delete message: {e}")
+
+        # Extract audio details
+        title = item.get('Name', 'Unknown Title')
+        album_artist = item.get('AlbumArtist', 'Unknown Artist')
+        album = item.get('Album', 'Unknown Album')
+        image_tag = item.get('ImageTags', {}).get('Primary')
+
+        # Construct the image URL with the API key.
+        image_url = ""
+        if image_tag:
+            image_url = f"http://{emby_server_ip}:{emby_server_port}/emby/Items/{current_item_id}/Images/Primary?tag={image_tag}&api_key={api_key}"
+
+        # Create the embed.
+        description = f"**Title:** {title}\n**Album Artist:** {album_artist}\n**Album:** {album}"
+        embed = discord.Embed(title="Audio", description=description, color=discord.Color.blue())
+
+        if image_url:
+            response = requests.get(image_url)
+            if response.status_code == 200:
+                with BytesIO(response.content) as image_io:
+                    image_io.seek(0)
+                    discord_file = discord.File(fp=image_io, filename='image.jpg')
+                    embed.set_image(url="attachment://image.jpg")
+            else:
+                discord_file = None
+        else:
+            discord_file = None
+
+        # Send the new message and update last_user_info
+        last_user_info[username]['last_message'] = await bot.now_playing_thread.send(embed=embed, file=discord_file if discord_file else None)
+        last_user_info[username]['last_item_id'] = current_item_id
+        last_user_info[username]['last_update_time'] = current_time
+        print(f"Sent new audio message for {username}.")
+
+        # Set the bot's status message
+        new_status = f"{album_artist}: ({album}) {title}"
+        await bot.change_presence(activity=discord.Game(name=new_status))
+        print(f"Updated bot status to: {new_status}")
+
+    except Exception as e:
+        print(f"An error occurred while handling audio: {str(e)}")
+        
+
+async def handle_music_video(bot, item, emby_server_ip, emby_server_port, api_key, username):
+    global last_user_info
+
+    try:
+        current_item_id = item.get('Id') if item else None
+        current_time = datetime.utcnow()
+
+        # Retrieve the last update time and item ID for the user
+        last_update_time = last_user_info[username].get('last_update_time', datetime.utcfromtimestamp(0))
+        last_item_id = last_user_info[username].get('last_item_id')
+
+        # Check if enough time has passed since the last update
+        if not item or (last_item_id == current_item_id and current_time - last_update_time < timedelta(seconds=10)):
             return
 
-        # Extract artist and song title
+        # Delete the previous message for the user, if any
+        last_message = last_user_info[username].get('last_message')
+        if last_message:
+            try:
+                await last_message.delete()
+                print("Deleted last message.")
+            except discord.HTTPException as e:
+                print(f"Failed to delete message: {e}")
+
+        # Extract music video details
         full_title = item.get('Name', 'Unknown Music Video')
         artist, song_title = full_title.split(" - ", 1) if " - " in full_title else ("Unknown Artist", full_title)
-
-        # Extract the year and image tag
         year = item.get('ProductionYear', 'Unknown Year')
         image_tag = item.get('ImageTags', {}).get('Primary', '')
 
-        # Construct the image URL with the Emby server and image tag
-        image_url = f"http://{emby_server_ip}:{emby_server_port}/emby/Items/{current_item_id}/Images/Primary?tag={image_tag}&api_key={api_key}"
+        # Construct the image URL with the API key.
+        image_url = ""
+        if image_tag:
+            image_url = f"http://{emby_server_ip}:{emby_server_port}/emby/Items/{current_item_id}/Images/Primary?tag={image_tag}&api_key={api_key}"
 
-        # Create the embed
-        description = f"Artist: {artist}\nTitle: {song_title}\nYear: {year}"
+        # Create the embed.
+        description = f"**Artist:** {artist}\n**Title:** {song_title}\n**Year:** {year}"
         embed = discord.Embed(title="Music Video", description=description, color=discord.Color.blue())
-        embed.set_image(url=image_url)
+        
+        if image_url:
+            response = requests.get(image_url)
+            if response.status_code == 200:
+                with BytesIO(response.content) as image_io:
+                    image_io.seek(0)
+                    discord_file = discord.File(fp=image_io, filename='image.jpg')
+                    embed.set_image(url="attachment://image.jpg")
+            else:
+                discord_file = None
+        else:
+            discord_file = None
+
+        # Send the new message and update last_user_info
+        last_user_info[username]['last_message'] = await bot.now_playing_thread.send(embed=embed, file=discord_file if discord_file else None)
+        last_user_info[username]['last_item_id'] = current_item_id
+        last_user_info[username]['last_update_time'] = current_time
+        print(f"Sent new music video message for {username}.")
 
         # Set the bot's status message
-        new_status = f"{artist} - {song_title} ({year})"
+        new_status = f"{artist} - {song_title}"
         await bot.change_presence(activity=discord.Game(name=new_status))
-
-        # Send the embed message
-        await update_or_send_new_message(bot, embed, username)
-
-        last_user_info[username]['last_item_id'] = current_item_id
+        print(f"Updated bot status to: {new_status}")
 
     except Exception as e:
         print(f"An error occurred while handling music video: {str(e)}")
 
-
-
-async def handle_music_video(bot, item, username):
-    global last_user_info
-
-    try:
-        current_item_id = item.get('Id') if item else None
-
-        if not item and last_user_info[username]['last_item_id'] is not None:
-            if last_user_info[username]['last_message']:
-                await last_user_info[username]['last_message'].delete()
-                last_user_info[username]['last_message'] = None
-            last_user_info[username]['last_item_id'] = None
-            return
-
-        if last_user_info[username]['last_item_id'] == current_item_id:
-            return
-
-        # Extract artist and song title
-        full_title = item.get('Name', 'Unknown Music Video')
-        artist, song_title = full_title.split(" - ", 1) if " - " in full_title else ("Unknown Artist", full_title)
-
-        # Extract the year
-        year = item.get('ProductionYear', 'Unknown Year')
-
-        # Construct the local file path for the poster image
-        local_image_path = item.get('Path', '').replace('.mp4', '-poster.jpg').replace('\\\\server1\\videos\\', '/path/to/your/local/directory/')
-
-        # Check if the image file exists and if the bot has access to it
-        if os.path.exists(local_image_path):
-            file = discord.File(local_image_path, filename="image.jpg")
-            embed = discord.Embed(title="Music Video", description=f"Artist: {artist}\nTitle: {song_title}\nYear: {year}", color=discord.Color.blue())
-            embed.set_image(url="attachment://image.jpg")
-        else:
-            print(f"Poster image not found at: {local_image_path}")
-            embed = discord.Embed(title="Music Video", description=f"Artist: {artist}\nTitle: {song_title}\nYear: {year}", color=discord.Color.blue())
-            # Optionally set a default image or proceed without an image
-
-        # Set the bot's status message
-        new_status = f"{artist} - {song_title} ({year})"
-        await bot.change_presence(activity=discord.Game(name=new_status))
-
-        # Send the embed message with or without the image file
-        if 'file' in locals():
-            await update_or_send_new_message(bot, embed, username, file=file)
-        else:
-            await update_or_send_new_message(bot, embed, username)
-
-        last_user_info[username]['last_item_id'] = current_item_id
-
-    except Exception as e:
-        print(f"An error occurred while handling music video: {str(e)}")
 
 
 async def handle_audio_book(bot, item, username):
@@ -444,24 +479,18 @@ async def handle_generic_media(bot, item, username, media_type):
     embed = discord.Embed(title=title, description=f"Currently watching/listening to {media_type}.", color=discord.Color.blue())
     await update_or_send_new_message(bot, embed, username)
 
-async def update_or_send_new_message(bot, embed, username, file=None):
+async def update_or_send_new_message(bot, embed, username):
     last_message = last_user_info[username]['last_message']
-    try:
-        if last_message:
-            # If a file needs to be sent, delete the old message and send a new one
-            if file:
-                await last_message.delete()
-                last_user_info[username]['last_message'] = await bot.now_playing_thread.send(embed=embed, file=file)
-            else:
-                await last_message.edit(embed=embed)
-            print(f"Updated message for {username}.")
-        else:
-            # Send a new message
-            last_user_info[username]['last_message'] = await bot.now_playing_thread.send(embed=embed, file=file if file else None)
-            print(f"Sent new message for {username}.")
-    except discord.NotFound:
-        # In case the last message was not found, send a new one
-        last_user_info[username]['last_message'] = await bot.now_playing_thread.send(embed=embed, file=file if file else None)
-        print(f"Sent new message for {username} (previous not found).")
+    if last_message:
+        try:
+            await last_message.edit(embed=embed)
+            print(f"Edited message for {username}.")
+        except discord.NotFound:
+            last_user_info[username]['last_message'] = await bot.now_playing_thread.send(embed=embed)
+            print(f"Sent new message for {username} (edit failed).")
+    else:
+        last_user_info[username]['last_message'] = await bot.now_playing_thread.send(embed=embed)
+        print(f"Sent new message for {username}.")
+
 
 bot.run(discord_bot_token)
