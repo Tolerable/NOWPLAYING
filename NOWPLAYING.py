@@ -177,15 +177,6 @@ async def clear_all_bot_messages():
 
     print("Cleared all bot messages.")
 
-async def delete_last_bot_message():
-    if bot.last_now_playing_message:
-        try:
-            await bot.last_now_playing_message.delete()
-            print("Deleted last message.")
-        except discord.HTTPException as e:
-            print(f"Failed to delete message: {e}")
-
-
 async def handle_nothing(username):
     global last_user_info, bot  # Ensure 'bot' is accessible
 
@@ -313,6 +304,21 @@ async def handle_media(bot, item, emby_server_ip, emby_server_port, api_key, ite
     if media_type == 'nothing' or last_user_info[username]['last_item_id'] != item_id:
         # Update the timestamp regardless of the media type
         last_user_info[username]['last_update_time'] = current_time
+
+        # Delete both embed and image messages for the user
+        if 'last_embed_message' in last_user_info[username] and last_user_info[username]['last_embed_message']:
+            try:
+                await last_user_info[username]['last_embed_message'].delete()
+            except discord.NotFound:
+                pass
+            last_user_info[username]['last_embed_message'] = None
+
+        if 'last_image_message' in last_user_info[username] and last_user_info[username]['last_image_message']:
+            try:
+                await last_user_info[username]['last_image_message'].delete()
+            except discord.NotFound:
+                pass
+            last_user_info[username]['last_image_message'] = None
 
         # Determine the type of media and call the appropriate handler
         if media_type == 'movie':
@@ -462,32 +468,27 @@ async def handle_movie(bot, item, emby_server_ip, emby_server_port, api_key, ite
 async def handle_audio(bot, item, emby_server_ip, emby_server_port, api_key, username):
     global last_user_info
 
-    # Call this function to clear the "Nothing Playing" message before proceeding
-    await clear_nothing_playing_message()
-
     # Initialize last_user_info for the user if not already done
     if username not in last_user_info:
         last_user_info[username] = {
             'last_item_id': None,
-            'last_embed_message': None,  # For tracking the latest message
-            'last_image_message': None  # For tracking the latest primary image message
+            'last_embed_message': None,
+            'last_image_message': None
         }
 
     # Extract details from the item
     title = item.get('Name', 'Unknown Title')
     artists = item.get('Artists', ['Unknown Artist'])
     artist_name = artists[0] if artists else 'Unknown Artist'
-    artist_items = item.get('ArtistItems', [])
-    artist_id = artist_items[0].get('Id') if artist_items else None
     album = item.get('Album', 'Unknown Album')
-    album_id = item.get('AlbumId', None)
-    album_image_tag = item.get('AlbumPrimaryImageTag', '')
+    album_id = item.get('AlbumId')  # Ensuring album_id is extracted from the item
+    year = item.get('ProductionYear', 'Unknown Year')  # Extracting the year
 
     # Prepare to fetch artist thumbnail
     artist_thumbnail_file = None
+    artist_id = item.get('ArtistItems', [{}])[0].get('Id', None)  # Safely getting the artist ID
     if artist_id:
         artist_thumbnail_url = f"http://{emby_server_ip}:{emby_server_port}/emby/Items/{artist_id}/Images/Primary?api_key={api_key}"
-
         async with aiohttp.ClientSession() as session:
             async with session.get(artist_thumbnail_url) as response:
                 if response.status == 200:
@@ -497,37 +498,37 @@ async def handle_audio(bot, item, emby_server_ip, emby_server_port, api_key, use
 
     # Prepare to fetch album cover image
     album_cover_file = None
-    album_cover_url = f"http://{emby_server_ip}:{emby_server_port}/emby/Items/{album_id}/Images/Primary?api_key={api_key}&tag={album_image_tag}"
-
-    async with aiohttp.ClientSession() as session:
-        async with session.get(album_cover_url) as response:
-            if response.status == 200:
-                album_cover_data = BytesIO(await response.read())
-                album_cover_data.seek(0)
-                album_cover_file = discord.File(album_cover_data, filename='album_cover.jpg')
+    if album_id:  # Ensure album_id is not None
+        album_cover_url = f"http://{emby_server_ip}:{emby_server_port}/emby/Items/{album_id}/Images/Primary?api_key={api_key}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(album_cover_url) as response:
+                if response.status == 200:
+                    album_cover_data = BytesIO(await response.read())
+                    album_cover_data.seek(0)
+                    album_cover_file = discord.File(album_cover_data, filename='album_cover.jpg')
 
     # Delete previous messages if they exist
-    if 'last_embed_message' in last_user_info[username]:
-        if last_user_info[username]['last_embed_message']:
-            try:
-                await last_user_info[username]['last_embed_message'].delete()
-            except discord.NotFound:
-                pass  # If the message is already deleted or not found, just pass
+    if 'last_embed_message' in last_user_info[username] and last_user_info[username]['last_embed_message']:
+        try:
+            await last_user_info[username]['last_embed_message'].delete()
+        except discord.NotFound:
+            pass  # If the message is already deleted or not found, just pass
         last_user_info[username]['last_embed_message'] = None
 
-    if 'last_image_message' in last_user_info[username]:
-        if last_user_info[username]['last_image_message']:
-            try:
-                await last_user_info[username]['last_image_message'].delete()
-            except discord.NotFound:
-                pass  # If the message is already deleted or not found, just pass
+    if 'last_image_message' in last_user_info[username] and last_user_info[username]['last_image_message']:
+        try:
+            await last_user_info[username]['last_image_message'].delete()
+        except discord.NotFound:
+            pass  # If the message is already deleted or not found, just pass
         last_user_info[username]['last_image_message'] = None
 
-    # Create the embed for the audio
-    embed = discord.Embed(title=f"{artist_name} - {title}", description=f"**Album:** {album}", color=discord.Color.blue())
+    # Create the embed for the audio with description formatting
+    embed = discord.Embed(title=title, color=discord.Color.blue())
+    embed_description = f"**Artist:** {artist_name}\n**Album:** {album}\n**Year:** {year}"
+    embed.description = embed_description
     if artist_thumbnail_file:
         embed.set_thumbnail(url="attachment://artist_thumbnail.jpg")
-
+        
     # Send the embed message with artist thumbnail
     new_embed_message = await bot.now_playing_thread.send(file=artist_thumbnail_file, embed=embed) if artist_thumbnail_file else await bot.now_playing_thread.send(embed=embed)
     last_user_info[username]['last_embed_message'] = new_embed_message
@@ -539,7 +540,7 @@ async def handle_audio(bot, item, emby_server_ip, emby_server_port, api_key, use
 
     # Update the bot's status message
     await bot.change_presence(activity=discord.Game(name=f"{artist_name}: {title}"))
-    
+
     
 
 async def handle_music_video(bot, item, emby_server_ip, emby_server_port, api_key, username):
